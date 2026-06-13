@@ -1,0 +1,183 @@
+{
+  "id": null,
+  "uid": "cdbct-crdb-overview",
+  "title": "CockroachDB Overview",
+  "tags": ["cockroachdb", "cdbct"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Live Nodes",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [{ "expr": "max(liveness_livenodes)", "legendFormat": "nodes" }],
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "red", "value": 0 },
+        { "color": "yellow", "value": 1 },
+        { "color": "green", "value": 3 }
+      ] } } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Open SQL Connections",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [{ "expr": "sum(sql_conns)", "legendFormat": "connections" }],
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Total Ranges",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [{ "expr": "sum(ranges)", "legendFormat": "ranges" }],
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Capacity Used",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [{ "expr": "sum(capacity_used) / sum(capacity) * 100", "legendFormat": "%" }],
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100,
+        "thresholds": { "steps": [
+          { "color": "green", "value": 0 },
+          { "color": "yellow", "value": 70 },
+          { "color": "red", "value": 90 }
+        ] } } }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Under-replicated Ranges",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [{ "expr": "sum(ranges_underreplicated)", "legendFormat": "underreplicated" }],
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "green", "value": 0 },
+        { "color": "red", "value": 1 }
+      ] } } }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Unavailable Ranges",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [{ "expr": "sum(ranges_unavailable)", "legendFormat": "unavailable" }],
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "green", "value": 0 },
+        { "color": "red", "value": 1 }
+      ] } } }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "SQL Statement Rate",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [
+        { "expr": "sum by (instance) (rate(sql_select_count[1m]))", "legendFormat": "SELECT {{instance}}" },
+        { "expr": "sum by (instance) (rate(sql_insert_count[1m]))", "legendFormat": "INSERT {{instance}}" },
+        { "expr": "sum by (instance) (rate(sql_update_count[1m]))", "legendFormat": "UPDATE {{instance}}" },
+        { "expr": "sum by (instance) (rate(sql_delete_count[1m]))", "legendFormat": "DELETE {{instance}}" }
+      ],
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "SQL Transaction Rate",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [
+        { "expr": "sum by (instance) (rate(sql_txn_commit_count[1m]))", "legendFormat": "commit {{instance}}" },
+        { "expr": "sum by (instance) (rate(sql_txn_rollback_count[1m]))", "legendFormat": "rollback {{instance}}" },
+        { "expr": "sum by (instance) (rate(sql_txn_abort_count[1m]))", "legendFormat": "abort {{instance}}" }
+      ],
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "SQL Transaction Latency (p99)",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum by (instance, le) (rate(sql_txn_latency_bucket[1m])))", "legendFormat": "p99 {{instance}}" },
+        { "expr": "histogram_quantile(0.50, sum by (instance, le) (rate(sql_txn_latency_bucket[1m])))", "legendFormat": "p50 {{instance}}" }
+      ],
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ns" } }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "SQL Errors",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [
+        { "expr": "sum by (instance) (rate(sql_failure_count[1m]))", "legendFormat": "errors {{instance}}" }
+      ],
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "thresholdsStyle": { "mode": "line" } },
+        "thresholds": { "steps": [ { "color": "green", "value": 0 }, { "color": "red", "value": 1 } ] } } }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "CPU Usage per Node",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [
+        { "expr": "sys_cpu_user_percent", "legendFormat": "user {{instance}}" },
+        { "expr": "sys_cpu_sys_percent", "legendFormat": "sys {{instance}}" }
+      ],
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100 } }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Memory RSS per Node",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [
+        { "expr": "sys_rss", "legendFormat": "rss {{instance}}" }
+      ],
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Liveness Heartbeat Latency",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum by (instance, le) (rate(liveness_heartbeatlatency_bucket[1m])))", "legendFormat": "p99 {{instance}}" }
+      ],
+      "gridPos": { "x": 0, "y": 28, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ns" } }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Storage: Bytes Written/Read per Node",
+      "datasource": { "type": "prometheus", "uid": "cdbct-prometheus" },
+      "targets": [
+        { "expr": "rate(rocksdb_bytes_ingested[1m])", "legendFormat": "written {{instance}}" },
+        { "expr": "rate(rocksdb_read_amplification[1m])", "legendFormat": "read-amp {{instance}}" }
+      ],
+      "gridPos": { "x": 12, "y": 28, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    }
+  ]
+}
