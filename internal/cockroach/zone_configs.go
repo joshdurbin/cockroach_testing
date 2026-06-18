@@ -13,11 +13,13 @@ import (
 // initialized cluster while the zone subsystem is still starting up.
 // All statements are idempotent — safe to run on every startup.
 var zoneConfigs = []struct {
-	name string
-	sql  string
+	name   string
+	region string // the cluster region this config targets
+	sql    string
 }{
 	{
 		"events_regional east → us-east (3 replicas + local leaseholder)",
+		"us-east",
 		`ALTER PARTITION east OF TABLE events_regional CONFIGURE ZONE USING
 		    num_replicas      = 3,
 		    constraints       = '[+region=us-east]',
@@ -25,6 +27,7 @@ var zoneConfigs = []struct {
 	},
 	{
 		"events_regional west → us-west (3 replicas + local leaseholder)",
+		"us-west",
 		`ALTER PARTITION west OF TABLE events_regional CONFIGURE ZONE USING
 		    num_replicas      = 3,
 		    constraints       = '[+region=us-west]',
@@ -32,6 +35,7 @@ var zoneConfigs = []struct {
 	},
 	{
 		"events_regional eu → eu-central (3 replicas + local leaseholder)",
+		"eu-central",
 		`ALTER PARTITION eu OF TABLE events_regional CONFIGURE ZONE USING
 		    num_replicas      = 3,
 		    constraints       = '[+region=eu-central]',
@@ -39,21 +43,29 @@ var zoneConfigs = []struct {
 	},
 }
 
-// ApplyZoneConfigs applies geo-partition zone configurations with exponential
-// backoff. The zone subsystem on a freshly initialized cluster may not be
-// ready immediately after cockroach init, so retries are expected on first run.
+// ApplyZoneConfigs applies geo-partition zone configurations for the given regions
+// with exponential backoff. Only configs targeting a region present in the list
+// are applied — for a single-region cluster only the one relevant partition config
+// runs; missing regions are simply skipped.
 //
 // lease_preferences pin leaseholders to the home region so writes and
 // leaseholder-reads travel one LAN hop instead of a potential WAN hop.
-// Without this, leaseholders drift freely after rebalancing even when
-// constraints keep replicas in the correct region.
-func ApplyZoneConfigs(ctx context.Context, pool *pgxpool.Pool) error {
+func ApplyZoneConfigs(ctx context.Context, pool *pgxpool.Pool, regions []string) error {
+	active := make(map[string]bool, len(regions))
+	for _, r := range regions {
+		active[r] = true
+	}
+
 	for _, zc := range zoneConfigs {
+		if !active[zc.region] {
+			log.Debug().Str("zone", zc.name).Str("region", zc.region).Msg("region not in topology, skipping zone config")
+			continue
+		}
 		if err := applyWithRetry(ctx, pool, zc.name, zc.sql); err != nil {
 			return err
 		}
 	}
-	log.Info().Msg("zone configs applied")
+	log.Info().Strs("regions", regions).Msg("zone configs applied")
 	return nil
 }
 

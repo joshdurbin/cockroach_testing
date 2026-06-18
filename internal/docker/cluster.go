@@ -18,16 +18,6 @@ import (
 // NodeSQLPort returns the host-mapped SQL port for node idx (1-based).
 func NodeSQLPort(idx int) int { return crdbSQLPort - 1 + idx }
 
-// nodeRegion maps a 1-based node index to a geographic region label.
-// Cycles through us-east → us-west → eu-central for any cluster size.
-func nodeRegion(idx int) string {
-	regions := []string{"us-east", "us-west", "eu-central"}
-	return regions[(idx-1)%len(regions)]
-}
-
-// NodeRegion is the exported form for use in workload configuration.
-func NodeRegion(idx int) string { return nodeRegion(idx) }
-
 // NodeHTTPPort returns the host-mapped Admin UI port for node idx (1-based).
 func NodeHTTPPort(idx int) int { return crdbHTTPPort - 1 + idx }
 
@@ -59,7 +49,7 @@ type NodeInfo struct {
 
 // CreateCluster starts N CockroachDB nodes plus Toxiproxy, then initialises the cluster.
 // Nodes advertise their RPC address through Toxiproxy; SQL clients connect directly.
-func (m *Manager) CreateCluster(ctx context.Context, cluster string, nodes int) ([]NodeInfo, error) {
+func (m *Manager) CreateCluster(ctx context.Context, cluster string, topo ClusterTopology) ([]NodeInfo, error) {
 	if err := m.PullImage(ctx, CRDBImage); err != nil {
 		return nil, err
 	}
@@ -68,20 +58,20 @@ func (m *Manager) CreateCluster(ctx context.Context, cluster string, nodes int) 
 	}
 
 	// Start Toxiproxy first so CRDB nodes can advertise through it.
-	if err := m.EnsureToxiproxy(ctx, cluster, nodes); err != nil {
+	if err := m.EnsureToxiproxy(ctx, cluster, topo.Nodes); err != nil {
 		return nil, fmt.Errorf("toxiproxy setup: %w", err)
 	}
 
 	// Build join list pointing through Toxiproxy.
-	joinParts := make([]string, nodes)
-	for i := range nodes {
+	joinParts := make([]string, topo.Nodes)
+	for i := range topo.Nodes {
 		joinParts[i] = fmt.Sprintf("cdbct-toxiproxy:%d", toxiRPCPort(i+1))
 	}
 	joinList := strings.Join(joinParts, ",")
 
 	var infos []NodeInfo
-	for i := range nodes {
-		info, err := m.startCRDBNode(ctx, cluster, i+1, nodes, joinList)
+	for i := range topo.Nodes {
+		info, err := m.startCRDBNode(ctx, cluster, i+1, topo, joinList)
 		if err != nil {
 			return nil, fmt.Errorf("start node %d: %w", i+1, err)
 		}
@@ -101,6 +91,7 @@ func (m *Manager) CreateCluster(ctx context.Context, cluster string, nodes int) 
 }
 
 // AddNode adds a node to an existing cluster (hot scale-up).
+// It reads the cluster mode from existing node labels to maintain consistent topology.
 func (m *Manager) AddNode(ctx context.Context, cluster string) (NodeInfo, error) {
 	existing, err := m.ListContainersByRole(ctx, cluster, RoleCRDB)
 	if err != nil {
@@ -120,10 +111,12 @@ func (m *Manager) AddNode(ctx context.Context, cluster string) (NodeInfo, error)
 		}
 	}
 	newIdx := maxIdx + 1
-	totalNodes := newIdx
+
+	// Read cluster mode from existing nodes to reconstruct topology.
+	topo := clusterTopologyFromLabels(existing[0].Labels, newIdx)
 
 	// Rebuild Toxiproxy proxies to include new node.
-	if err := m.EnsureToxiproxy(ctx, cluster, totalNodes); err != nil {
+	if err := m.EnsureToxiproxy(ctx, cluster, newIdx); err != nil {
 		return NodeInfo{}, fmt.Errorf("toxiproxy update: %w", err)
 	}
 
@@ -133,7 +126,7 @@ func (m *Manager) AddNode(ctx context.Context, cluster string) (NodeInfo, error)
 		joinParts[i] = fmt.Sprintf("cdbct-toxiproxy:%d", toxiRPCPort(i+1))
 	}
 
-	info, err := m.startCRDBNode(ctx, cluster, newIdx, totalNodes, strings.Join(joinParts, ","))
+	info, err := m.startCRDBNode(ctx, cluster, newIdx, topo, strings.Join(joinParts, ","))
 	if err != nil {
 		return NodeInfo{}, err
 	}
@@ -142,7 +135,33 @@ func (m *Manager) AddNode(ctx context.Context, cluster string) (NodeInfo, error)
 	return info, nil
 }
 
-func (m *Manager) startCRDBNode(ctx context.Context, cluster string, idx, totalNodes int, joinList string) (NodeInfo, error) {
+// GetClusterTopology reads the cluster mode from existing node labels and returns
+// the topology. Falls back to multi-geo with the observed node count if unlabelled.
+func (m *Manager) GetClusterTopology(ctx context.Context, cluster string) (ClusterTopology, error) {
+	nodes, err := m.ListContainersByRole(ctx, cluster, RoleCRDB)
+	if err != nil {
+		return MultiGeoTopology(9), err
+	}
+	if len(nodes) == 0 {
+		return MultiGeoTopology(9), nil
+	}
+	return clusterTopologyFromLabels(nodes[0].Labels, len(nodes)), nil
+}
+
+// clusterTopologyFromLabels reconstructs a ClusterTopology from Docker container labels.
+func clusterTopologyFromLabels(labels map[string]string, nodeCount int) ClusterTopology {
+	mode := ClusterMode(labels[LabelClusterMode])
+	switch mode {
+	case ModeSingleRegion:
+		t := SingleRegionTopology()
+		t.Nodes = nodeCount
+		return t
+	default:
+		return MultiGeoTopology(nodeCount)
+	}
+}
+
+func (m *Manager) startCRDBNode(ctx context.Context, cluster string, idx int, topo ClusterTopology, joinList string) (NodeInfo, error) {
 	name := fmt.Sprintf("cdbct-crdb-%d", idx)
 	volName := fmt.Sprintf("cdbct-crdb-%d-data", idx)
 
@@ -150,9 +169,9 @@ func (m *Manager) startCRDBNode(ctx context.Context, cluster string, idx, totalN
 		return NodeInfo{}, fmt.Errorf("volume %s: %w", volName, err)
 	}
 
-	sqlHostPort  := strconv.Itoa(crdbSQLPort - 1 + idx)  // 26257, 26258, 26259, ...
+	sqlHostPort := strconv.Itoa(crdbSQLPort - 1 + idx)  // 26257, 26258, 26259, ...
 	httpHostPort := strconv.Itoa(crdbHTTPPort - 1 + idx) // 8080, 8081, 8082, ...
-	rpcHostPort  := strconv.Itoa(crdbRPCPort - 1 + idx)  // 26357, 26358, 26359, ...
+	rpcHostPort := strconv.Itoa(crdbRPCPort - 1 + idx)   // 26357, 26358, 26359, ...
 
 	portBindings := nat.PortMap{
 		nat.Port(fmt.Sprintf("%d/tcp", crdbSQLPort)):  []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: sqlHostPort}},
@@ -177,23 +196,23 @@ func (m *Manager) startCRDBNode(ctx context.Context, cluster string, idx, totalN
 		fmt.Sprintf("--advertise-sql-addr=%s:%d", name, crdbSQLPort),
 		"--join=" + joinList,
 		"--store=/cockroach/cockroach-data",
-		// Cap memory so three nodes + obs stack fit in a constrained Colima VM.
-		// Default is 128MiB cache / 25% of RAM SQL; these explicit limits prevent
-		// memory pressure that spikes Raft latency and triggers clock-offset restarts.
+		// Cap memory so the full cluster + obs stack fits in a constrained Colima VM.
 		"--cache=128MiB",
 		"--max-sql-memory=256MiB",
 		// Locality tags enable zone config constraints and lease_preferences to
-		// resolve against physical nodes. Node N cycles through the three
-		// canonical regions so zone configs work correctly in a single-VM cluster.
-		fmt.Sprintf("--locality=region=%s,az=az1", nodeRegion(idx)),
+		// resolve against physical nodes.
+		fmt.Sprintf("--locality=region=%s,az=az1", topo.NodeRegion(idx)),
 	}
+
+	labels := managedLabels(cluster, RoleCRDB, strconv.Itoa(idx))
+	labels[LabelClusterMode] = string(topo.Mode)
 
 	resp, err := m.client.ContainerCreate(ctx,
 		&container.Config{
 			Image:        CRDBImage,
 			Cmd:          cmd,
 			ExposedPorts: exposedPorts,
-			Labels:       managedLabels(cluster, RoleCRDB, strconv.Itoa(idx)),
+			Labels:       labels,
 			Hostname:     name,
 		},
 		&container.HostConfig{

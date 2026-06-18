@@ -126,7 +126,8 @@ func (s *tenantServer) VerifyRLS(ctx context.Context, _ *pb.VerifyRLSRequest) (*
 		return nil, fmt.Errorf("admin count: %w", err)
 	}
 
-	// Sample one tenant per region — run all three in parallel.
+	// Sample one tenant per active region — run all in parallel.
+	activeRegions := s.tenants.ActiveRegions()
 	seen := map[string]bool{}
 	var candidates []Tenant
 	for _, t := range s.tenants.All() {
@@ -135,7 +136,7 @@ func (s *tenantServer) VerifyRLS(ctx context.Context, _ *pb.VerifyRLSRequest) (*
 		}
 		seen[t.HomeRegion] = true
 		candidates = append(candidates, t)
-		if len(candidates) == len(Regions) {
+		if len(candidates) == len(activeRegions) {
 			break
 		}
 	}
@@ -240,8 +241,8 @@ func (s *tenantServer) GetRegionStatus(ctx context.Context, _ *pb.GetRegionStatu
 		"eu-central": "eu",
 	}
 
-	statuses := make([]*pb.RegionStatus, 0, len(Regions))
-	for _, region := range Regions {
+	statuses := make([]*pb.RegionStatus, 0)
+	for _, region := range s.tenants.ActiveRegions() {
 		tenants := s.tenants.ByRegion(region)
 		tiers := &pb.TierSummary{}
 		for _, t := range tenants {

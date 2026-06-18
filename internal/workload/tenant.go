@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"sort"
 	"sync"
 
 	"github.com/google/uuid"
@@ -19,10 +20,6 @@ const (
 	QoSBackground = "background"
 )
 
-// Regions matches the three locality regions assigned to the 9-node cluster.
-// The order mirrors docker.nodeRegion — index 0 = node 1's region, etc.
-var Regions = []string{"us-east", "us-west", "eu-central"}
-
 // Tenant represents one entry in the fixed tenant pool.
 type Tenant struct {
 	ID         uuid.UUID
@@ -32,10 +29,10 @@ type Tenant struct {
 
 // TenantPool is the in-memory tenant pool loaded from the tenants table.
 type TenantPool struct {
-	mu        sync.RWMutex
-	all       []Tenant
-	byTier    map[string][]Tenant
-	byRegion  map[string][]Tenant
+	mu       sync.RWMutex
+	all      []Tenant
+	byTier   map[string][]Tenant
+	byRegion map[string][]Tenant
 }
 
 // Random returns a uniformly random tenant from the pool.
@@ -77,14 +74,28 @@ func (p *TenantPool) All() []Tenant {
 	return out
 }
 
+// ActiveRegions returns the sorted list of regions that have at least one tenant.
+func (p *TenantPool) ActiveRegions() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	regions := make([]string, 0, len(p.byRegion))
+	for r, tenants := range p.byRegion {
+		if len(tenants) > 0 {
+			regions = append(regions, r)
+		}
+	}
+	sort.Strings(regions)
+	return regions
+}
+
 // SeedOrLoad seeds the tenants table with n tenant UUIDs if it is empty,
 // or loads the existing pool if already seeded.
 //
 // QoS distribution: 20% critical, 60% regular, 20% background (min 1 each).
-// Region distribution: cyclic us-east → us-west → eu-central.
+// Region distribution: cyclic over the provided regions list.
 // These two dimensions are assigned independently so every combination is
 // represented as the pool grows.
-func SeedOrLoad(ctx context.Context, adminPool *pgxpool.Pool, n int) (*TenantPool, error) {
+func SeedOrLoad(ctx context.Context, adminPool *pgxpool.Pool, n int, regions []string) (*TenantPool, error) {
 	q := db.New(adminPool)
 
 	count, err := q.CountTenants(ctx)
@@ -93,10 +104,10 @@ func SeedOrLoad(ctx context.Context, adminPool *pgxpool.Pool, n int) (*TenantPoo
 	}
 
 	if count == 0 {
-		if err := seed(ctx, q, n); err != nil {
+		if err := seed(ctx, q, n, regions); err != nil {
 			return nil, fmt.Errorf("seed tenants: %w", err)
 		}
-		log.Info().Int("count", n).Msg("tenant pool seeded")
+		log.Info().Int("count", n).Strs("regions", regions).Msg("tenant pool seeded")
 	} else {
 		log.Info().Int("count", int(count)).Msg("tenant pool already exists, loading")
 	}
@@ -104,7 +115,7 @@ func SeedOrLoad(ctx context.Context, adminPool *pgxpool.Pool, n int) (*TenantPoo
 	return load(ctx, q)
 }
 
-func seed(ctx context.Context, q *db.Queries, n int) error {
+func seed(ctx context.Context, q *db.Queries, n int, regions []string) error {
 	critical, regular, background := distribute(n)
 
 	// Build the tier list.
@@ -122,7 +133,7 @@ func seed(ctx context.Context, q *db.Queries, n int) error {
 	// Assign home_region cyclically, independent of QoS tier, so every
 	// region × tier combination is represented as the pool grows.
 	for i, tier := range tiers {
-		homeRegion := Regions[i%len(Regions)]
+		homeRegion := regions[i%len(regions)]
 		if err := q.InsertTenant(ctx, db.InsertTenantParams{
 			ID:         uuid.New(),
 			QosTier:    tier,
@@ -155,9 +166,7 @@ func load(ctx context.Context, q *db.Queries) (*TenantPool, error) {
 		Int("critical", len(p.byTier[QoSCritical])).
 		Int("regular", len(p.byTier[QoSRegular])).
 		Int("background", len(p.byTier[QoSBackground])).
-		Int("us_east", len(p.byRegion["us-east"])).
-		Int("us_west", len(p.byRegion["us-west"])).
-		Int("eu_central", len(p.byRegion["eu-central"])).
+		Strs("regions", p.ActiveRegions()).
 		Msg("tenant pool loaded")
 	return p, nil
 }

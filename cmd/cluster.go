@@ -28,15 +28,27 @@ var clusterCreateCmd = &cobra.Command{
 
 		nodes := viper.GetInt("cluster.nodes")
 		cluster := viper.GetString("cluster.name")
+		mode := viper.GetString("cluster.mode")
 
-		log.Info().Str("cluster", cluster).Int("nodes", nodes).Msg("creating cluster")
+		var topo docker.ClusterTopology
+		switch docker.ClusterMode(mode) {
+		case docker.ModeSingleRegion:
+			topo = docker.SingleRegionTopology()
+			if cmd.Flags().Changed("nodes") {
+				topo.Nodes = nodes
+			}
+		default:
+			topo = docker.MultiGeoTopology(nodes)
+		}
 
-		infos, err := m.CreateCluster(cmd.Context(), cluster, nodes)
+		log.Info().Str("cluster", cluster).Int("nodes", topo.Nodes).Str("mode", string(topo.Mode)).Msg("creating cluster")
+
+		infos, err := m.CreateCluster(cmd.Context(), cluster, topo)
 		if err != nil {
 			return err
 		}
 
-		fmt.Printf("\nCluster %q ready (%d nodes)\n\n", cluster, len(infos))
+		fmt.Printf("\nCluster %q ready (%d nodes, %s)\n\n", cluster, len(infos), topo.Mode)
 		fmt.Printf("  %-8s  %-22s  %s\n", "NODE", "SQL", "ADMIN UI")
 		for _, n := range infos {
 			fmt.Printf("  %-8d  localhost:%-12d  http://localhost:%d\n",
@@ -170,7 +182,9 @@ func init() {
 	clusterCmd.AddCommand(clusterCreateCmd, clusterScaleCmd, clusterLsCmd, clusterRmCmd, clusterStatusCmd)
 
 	clusterCreateCmd.Flags().IntP("nodes", "n", 9, "number of CockroachDB nodes (9 = 3 per region, geo-partitions survive single-node failure)")
+	clusterCreateCmd.Flags().String("mode", "multi-geo", "cluster mode: multi-geo (3-region) or single-region (us-west)")
 	viper.BindPFlag("cluster.nodes", clusterCreateCmd.Flags().Lookup("nodes"))
+	viper.BindPFlag("cluster.mode", clusterCreateCmd.Flags().Lookup("mode"))
 
 	clusterRmCmd.Flags().Bool("purge", false, "also delete data volumes")
 	viper.BindPFlag("cluster.purge", clusterRmCmd.Flags().Lookup("purge"))

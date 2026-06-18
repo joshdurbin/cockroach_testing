@@ -25,16 +25,16 @@ import (
 var workloadDockerfileContent []byte
 
 const (
-	WorkloadImageTag  = "cdbct-workload:latest"
-	workloadContainer = "cdbct-workload"
+	WorkloadImageTag             = "cdbct-workload:latest"
+	workloadContainer            = "cdbct-workload"
 	WorkloadMetricsContainerPort = 9091
-	RoleWorkload      = "workload"
+	RoleWorkload                 = "workload"
 )
 
 // WorkloadOptions configures the workload container.
 type WorkloadOptions struct {
 	Cluster     string
-	Nodes       int
+	Topology    ClusterTopology
 	Interval    time.Duration
 	BatchSize   int
 	QueryEvery  time.Duration
@@ -62,20 +62,34 @@ func InternalDSN(nodes int) string {
 // The workload uses per-region pools so that geo-partitioned writes are
 // routed through a home-region SQL gateway node, avoiding cross-region hops
 // before the write even reaches the leaseholder.
-func RegionalDSN(nodes int, region string) string {
+func RegionalDSN(topo ClusterTopology, region string) string {
 	var hosts []string
-	for i := 1; i <= nodes; i++ {
-		if nodeRegion(i) == region {
+	for i := 1; i <= topo.Nodes; i++ {
+		if topo.NodeRegion(i) == region {
 			hosts = append(hosts, fmt.Sprintf("cdbct-crdb-%d:%d", i, crdbSQLPort))
 		}
 	}
 	if len(hosts) == 0 {
-		return InternalDSN(nodes)
+		return InternalDSN(topo.Nodes)
 	}
 	return fmt.Sprintf(
 		"postgresql://root@%s/defaultdb?sslmode=disable&load_balance_hosts=random",
 		strings.Join(hosts, ","),
 	)
+}
+
+// regionDSNFlag maps a region name to its workload --dsn-<x> flag name.
+func regionDSNFlag(region string) string {
+	switch region {
+	case "us-east":
+		return "--dsn-east"
+	case "us-west":
+		return "--dsn-west"
+	case "eu-central":
+		return "--dsn-eu"
+	default:
+		return ""
+	}
 }
 
 // BuildWorkloadImage builds the cdbct-workload Docker image from the project
@@ -126,6 +140,7 @@ func (m *Manager) BuildWorkloadImage(ctx context.Context) error {
 }
 
 // StartWorkload starts the workload container on the cdbct-net network.
+// DSN flags are built dynamically from the topology's active regions.
 func (m *Manager) StartWorkload(ctx context.Context, opts WorkloadOptions) error {
 	// Remove any pre-existing workload container.
 	existing, _ := m.ListContainersByRole(ctx, opts.Cluster, RoleWorkload)
@@ -149,19 +164,31 @@ func (m *Manager) StartWorkload(ctx context.Context, opts WorkloadOptions) error
 	if tenantCount == 0 {
 		tenantCount = 10
 	}
+
+	// Base command with the global DSN (all nodes).
 	cmd := []string{
 		"workload", "start",
-		"--dsn", InternalDSN(opts.Nodes),
-		"--dsn-east", RegionalDSN(opts.Nodes, "us-east"),
-		"--dsn-west", RegionalDSN(opts.Nodes, "us-west"),
-		"--dsn-eu", RegionalDSN(opts.Nodes, "eu-central"),
+		"--dsn", InternalDSN(opts.Topology.Nodes),
+	}
+
+	// Append a regional DSN flag for each active region in the topology.
+	for _, region := range opts.Topology.Regions {
+		flag := regionDSNFlag(region)
+		if flag == "" {
+			log.Warn().Str("region", region).Msg("no --dsn flag mapping for region, skipping")
+			continue
+		}
+		cmd = append(cmd, flag, RegionalDSN(opts.Topology, region))
+	}
+
+	cmd = append(cmd,
 		"--interval", opts.Interval.String(),
 		"--batch", strconv.Itoa(opts.BatchSize),
 		"--query-every", opts.QueryEvery.String(),
 		"--tenants", strconv.Itoa(tenantCount),
 		"--metrics-addr", fmt.Sprintf(":%d", WorkloadMetricsContainerPort),
 		"--grpc-addr", fmt.Sprintf(":%d", WorkloadGRPCContainerPort),
-	}
+	)
 
 	resp, err := m.client.ContainerCreate(ctx,
 		&container.Config{
@@ -197,6 +224,8 @@ func (m *Manager) StartWorkload(ctx context.Context, opts WorkloadOptions) error
 		Int("batch", opts.BatchSize).
 		Dur("query_every", opts.QueryEvery).
 		Int("tenants", opts.TenantCount).
+		Str("mode", string(opts.Topology.Mode)).
+		Strs("regions", opts.Topology.Regions).
 		Msg("workload container started")
 	return nil
 }

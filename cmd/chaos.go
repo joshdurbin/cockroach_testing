@@ -171,13 +171,13 @@ var chaosRegionalCmd = &cobra.Command{
 	Use:   "regional",
 	Short: "Re-apply realistic inter-region latency baselines (run after chaos clear)",
 	Long: `Injects the well-known one-way latency for each node's region onto its Toxiproxy proxy.
-These baselines are applied automatically by quickstart and are removed by chaos clear.
+These baselines are applied automatically by quickstart multi-geo-cluster and are removed by chaos clear.
 
-  us-east  nodes (1,4,7) : 39ms ±5ms   avg of 33ms→us-west, 45ms→eu-central
-  us-west  nodes (2,5,8) : 51ms ±8ms   avg of 33ms→us-east, 70ms→eu-central
-  eu-central nodes (3,6,9): 57ms ±10ms  avg of 45ms→us-east, 70ms→us-west
+  us-east  nodes (1,4,7) : 42ms ±5ms  → ~84ms RTT
+  us-west  nodes (2,5,8) : 55ms ±8ms  → ~110ms RTT
+  eu-central nodes (3,6,9): 61ms ±10ms → ~122ms RTT
 
-Chaos faults injected after this command stack additively on top of these baselines.`,
+Only applicable for multi-geo clusters. Chaos faults stack additively on top of these baselines.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		m, err := docker.NewManager()
 		if err != nil {
@@ -185,12 +185,22 @@ Chaos faults injected after this command stack additively on top of these baseli
 		}
 		defer m.Close()
 
-		nodes := viper.GetInt("chaos.nodes")
+		cluster := viper.GetString("cluster.name")
+		topo, err := m.GetClusterTopology(cmd.Context(), cluster)
+		if err != nil {
+			return fmt.Errorf("read cluster topology: %w", err)
+		}
+
+		if topo.Mode == docker.ModeSingleRegion {
+			fmt.Println("Regional latencies are not applicable for single-region clusters.")
+			return nil
+		}
+
 		apiAddr := viper.GetString("chaos.api-addr")
-		if err := m.ApplyRegionalLatencies(apiAddr, nodes); err != nil {
+		if err := m.ApplyRegionalLatencies(apiAddr, topo); err != nil {
 			return err
 		}
-		fmt.Printf("Regional latencies applied for %d nodes.\n", nodes)
+		fmt.Printf("Regional latencies applied for %d nodes.\n", topo.Nodes)
 		return nil
 	},
 }
@@ -264,7 +274,9 @@ func init() {
 	)
 
 	chaosCmd.PersistentFlags().String("api-addr", "localhost:8474", "Toxiproxy API address")
+	chaosCmd.PersistentFlags().String("cluster-name", docker.DefaultCluster, "cluster name")
 	viper.BindPFlag("chaos.api-addr", chaosCmd.PersistentFlags().Lookup("api-addr"))
+	viper.BindPFlag("cluster.name", chaosCmd.PersistentFlags().Lookup("cluster-name"))
 
 	// --nodes is only used by chaos setup to register proxies.
 	// status and clear-all discover proxies from Toxiproxy directly.
@@ -282,6 +294,4 @@ func init() {
 	chaosInjectTimeoutCmd.Flags().Int("timeout", 5000, "timeout in ms before connection is closed")
 	viper.BindPFlag("chaos.inject.timeout", chaosInjectTimeoutCmd.Flags().Lookup("timeout"))
 
-	chaosSetupCmd.Flags().String("cluster-name", docker.DefaultCluster, "cluster name")
-	viper.BindPFlag("cluster.name", chaosSetupCmd.Flags().Lookup("cluster-name"))
 }

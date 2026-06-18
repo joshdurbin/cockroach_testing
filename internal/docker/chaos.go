@@ -177,11 +177,11 @@ func regionalLatencyToxicName(nodeIdx int) string {
 // Two toxics per node are registered (name-up / name-down) so they coexist
 // with user-injected chaos faults — all are applied additively by Toxiproxy.
 // chaos clear removes them; chaos regional re-applies them.
-func (m *Manager) ApplyRegionalLatencies(apiAddr string, n int) error {
+func (m *Manager) ApplyRegionalLatencies(apiAddr string, topo ClusterTopology) error {
 	c := chaos.New(apiAddr)
-	for i := range n {
+	for i := range topo.Nodes {
 		idx := i + 1
-		region := nodeRegion(idx)
+		region := topo.NodeRegion(idx)
 		lat, ok := chaos.WellKnownLatencies[region]
 		if !ok {
 			log.Warn().Int("node", idx).Str("region", region).Msg("no well-known latency for region, skipping")
@@ -199,10 +199,8 @@ func (m *Manager) ApplyRegionalLatencies(apiAddr string, n int) error {
 			Msg("regional latency applied")
 	}
 	log.Info().
-		Int("nodes", n).
-		Str("us_east_ms", "42±5 (RTT ~84ms)").
-		Str("us_west_ms", "55±8 (RTT ~110ms)").
-		Str("eu_central_ms", "61±10 (RTT ~122ms)").
+		Int("nodes", topo.Nodes).
+		Strs("regions", topo.Regions).
 		Msg("regional latencies applied (bidirectional)")
 	return nil
 }

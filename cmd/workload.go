@@ -53,7 +53,16 @@ var workloadStartCmd = &cobra.Command{
 
 		// Running on the host — build image and start container.
 		nodes := viper.GetInt("workload.nodes")
+		mode := viper.GetString("workload.mode")
 		cluster := viper.GetString("cluster.name")
+
+		var topo docker.ClusterTopology
+		switch docker.ClusterMode(mode) {
+		case docker.ModeSingleRegion:
+			topo = docker.SingleRegionTopology()
+		default:
+			topo = docker.MultiGeoTopology(nodes)
+		}
 
 		m, err := docker.NewManager()
 		if err != nil {
@@ -68,7 +77,7 @@ var workloadStartCmd = &cobra.Command{
 		tenants := viper.GetInt("workload.tenants")
 		if err := m.StartWorkload(cmd.Context(), docker.WorkloadOptions{
 			Cluster:     cluster,
-			Nodes:       nodes,
+			Topology:    topo,
 			Interval:    interval,
 			BatchSize:   batch,
 			QueryEvery:  queryEvery,
@@ -135,7 +144,8 @@ func init() {
 	workloadStartCmd.Flags().Duration("interval", 100*time.Millisecond, "tick interval between insert batches")
 	workloadStartCmd.Flags().Int("batch", 1, "audit events inserted per tick")
 	workloadStartCmd.Flags().Duration("query-every", 500*time.Millisecond, "how often to run read queries")
-	workloadStartCmd.Flags().Int("nodes", 3, "number of cluster nodes (for host-side DSN)")
+	workloadStartCmd.Flags().Int("nodes", 9, "number of cluster nodes (for host-side DSN, multi-geo mode)")
+	workloadStartCmd.Flags().String("mode", "multi-geo", "cluster mode: multi-geo or single-region (affects DSN construction)")
 	workloadStartCmd.Flags().Int("tenants", 10, "number of tenants to seed (10, 25, or 50)")
 	workloadStartCmd.Flags().String("metrics-addr", ":9091", "Prometheus metrics listen address")
 	workloadStartCmd.Flags().String("grpc-addr", ":9092", "gRPC server listen address")
@@ -148,6 +158,7 @@ func init() {
 	viper.BindPFlag("workload.batch", workloadStartCmd.Flags().Lookup("batch"))
 	viper.BindPFlag("workload.query-every", workloadStartCmd.Flags().Lookup("query-every"))
 	viper.BindPFlag("workload.nodes", workloadStartCmd.Flags().Lookup("nodes"))
+	viper.BindPFlag("workload.mode", workloadStartCmd.Flags().Lookup("mode"))
 	viper.BindPFlag("workload.tenants", workloadStartCmd.Flags().Lookup("tenants"))
 	viper.BindPFlag("workload.metrics-addr", workloadStartCmd.Flags().Lookup("metrics-addr"))
 	viper.BindPFlag("workload.grpc-addr", workloadStartCmd.Flags().Lookup("grpc-addr"))

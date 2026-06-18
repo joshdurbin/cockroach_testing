@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"sort"
 	"sync"
 	"time"
 
@@ -24,10 +25,11 @@ import (
 type Config struct {
 	DSN          string            // admin (root) DSN — used for migrations and seeding
 	RegionalDSNs map[string]string // region → root DSN scoped to that region's nodes
+	Regions      []string          // active regions; derived from RegionalDSNs if empty
 	Interval     time.Duration     // tick interval between write rounds
 	BatchSize    int               // writes per tick (each write = global + home-region)
 	QueryEvery   time.Duration     // how often to run read queries
-	TenantCount  int               // number of tenants to seed (10 | 25 | 50)
+	TenantCount  int               // number of tenants to seed
 	MetricsAddr  string            // Prometheus metrics HTTP listen address
 	GRPCAddr     string            // gRPC server listen address
 }
@@ -41,6 +43,20 @@ var (
 func Run(ctx context.Context, cfg Config) error {
 	serveMetrics(cfg.MetricsAddr)
 
+	// Derive active regions from non-empty regional DSNs when not explicitly set.
+	if len(cfg.Regions) == 0 {
+		for region, dsn := range cfg.RegionalDSNs {
+			if dsn != "" {
+				cfg.Regions = append(cfg.Regions, region)
+			}
+		}
+		sort.Strings(cfg.Regions)
+	}
+	// Fall back to the full three-region set if no regional DSNs were provided.
+	if len(cfg.Regions) == 0 {
+		cfg.Regions = []string{"us-east", "us-west", "eu-central"}
+	}
+
 	// Admin pool: root — runs migrations, seeds tenants, used by gRPC admin queries.
 	adminPool, err := cockroach.Connect(ctx, cfg.DSN)
 	if err != nil {
@@ -48,11 +64,11 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer adminPool.Close()
 
-	if err := cockroach.ApplyZoneConfigs(ctx, adminPool.Pool); err != nil {
+	if err := cockroach.ApplyZoneConfigs(ctx, adminPool.Pool, cfg.Regions); err != nil {
 		return fmt.Errorf("zone configs: %w", err)
 	}
 
-	tenants, err := SeedOrLoad(ctx, adminPool.Pool, cfg.TenantCount)
+	tenants, err := SeedOrLoad(ctx, adminPool.Pool, cfg.TenantCount, cfg.Regions)
 	if err != nil {
 		return fmt.Errorf("tenant pool: %w", err)
 	}
@@ -85,6 +101,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	log.Info().
 		Int("regional_pools", len(regionalPools)).
+		Strs("regions", cfg.Regions).
 		Msg("per-region pools connected")
 
 	go func() {
@@ -97,6 +114,7 @@ func Run(ctx context.Context, cfg Config) error {
 		Dur("interval", cfg.Interval).
 		Int("batch", cfg.BatchSize).
 		Int("tenants", tenants.Len()).
+		Strs("regions", cfg.Regions).
 		Msg("workload running")
 
 	writeTicker := time.NewTicker(cfg.Interval)
@@ -111,7 +129,7 @@ func Run(ctx context.Context, cfg Config) error {
 		case <-writeTicker.C:
 			go runWrites(ctx, appPool, regionalPools, tenants, cfg.BatchSize)
 		case <-queryTicker.C:
-			go runReads(ctx, appPool, regionalPools, tenants)
+			go runReads(ctx, appPool, regionalPools, tenants, cfg.Regions)
 		}
 	}
 }
@@ -223,7 +241,7 @@ func setTenantContext(ctx context.Context, tx pgx.Tx, t Tenant) error {
 }
 
 // runReads queries recent event counts for a randomly sampled tenant from each
-// region, exercising every partition's read path each tick.
+// active region, exercising every partition's read path each tick.
 //
 // QoS differentiation:
 //   - critical / regular — strong consistent reads (leaseholder-served).
@@ -231,7 +249,7 @@ func setTenantContext(ctx context.Context, tx pgx.Tx, t Tenant) error {
 //     Served from the nearest replica regardless of leaseholder location.
 //     Tolerable staleness (typically ~3s) is acceptable for background-tier tenants
 //     and makes the latency gap between tiers visible even at low write rates.
-func runReads(ctx context.Context, appPool *pgxpool.Pool, regionalPools map[string]*pgxpool.Pool, tenants *TenantPool) {
+func runReads(ctx context.Context, appPool *pgxpool.Pool, regionalPools map[string]*pgxpool.Pool, tenants *TenantPool, regions []string) {
 	since := pgtype.Timestamptz{Time: time.Now().Add(-time.Minute), Valid: true}
 
 	read := func(target string, tenant Tenant, fn func() error) {
@@ -246,7 +264,7 @@ func runReads(ctx context.Context, appPool *pgxpool.Pool, regionalPools map[stri
 		}
 	}
 
-	for _, region := range Regions {
+	for _, region := range regions {
 		regional := tenants.ByRegion(region)
 		if len(regional) == 0 {
 			continue
